@@ -1,18 +1,18 @@
 # Howdy Qt
 
-A Qt-based graphical interface for managing [Howdy](https://github.com/boltgolt/howdy) face authentication on Linux systems with Windows Hello compatible hardware.
+A Qt-based graphical interface for managing [**Howdy**](https://github.com/boltgolt/howdy) face authentication on Linux systems with Windows Hello compatible hardware.
 
 ## Hardware Requirements
 
-- **IR Camera**: A Windows Hello compatible infrared camera is required. These are commonly found in:
-  - Modern laptops with Windows Hello support (Dell, Lenovo ThinkPad, HP EliteBook, Microsoft Surface, etc.)
-  - External Windows Hello compatible webcams (e.g., Logitech Brio)
+- **IR Camera**: A Windows Hello compatible infrared camera is required. Found in:
+  - Modern laptops (Dell, Lenovo ThinkPad, HP EliteBook, Microsoft Surface, etc.)
+  - External webcams (e.g., Logitech Brio)
 
 - **Supported Devices**: Your IR camera must be recognized by Linux and accessible via `/dev/video*`
 
 ## Usage
 
-1. **Launch the application** - The app will automatically detect if compatible hardware is present
+1. **Launch the application** - It will automatically detect if compatible hardware is present
    - Green banner: IR camera detected and ready
    - Red banner: No compatible camera found
 
@@ -32,9 +32,3 @@ A Qt-based graphical interface for managing [Howdy](https://github.com/boltgolt/
 
 5. **Enable/Disable**:
    - Toggle Howdy on or off system-wide using the Enable/Disable button
-
-## Dependencies
-
-- Qt6
-- Howdy
-- Polkit (for privilege escalation)
