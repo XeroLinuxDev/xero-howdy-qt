@@ -1,0 +1,24 @@
+# Maintainer: xero <x@xero.dev>
+
+pkgname=xero-howdy-qt
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Qt GUI for managing Howdy face authentication on Windows Hello supported devices"
+arch=('x86_64')
+url="https://github.com/XeroLinuxDev/xero-howdy-qt"
+license=('MIT')
+depends=('qt6-base' 'qt6-declarative' 'howdy' 'polkit')
+makedepends=('rust' 'cargo' 'clang')
+source=()
+sha256sums=()
+
+build() {
+    cd "$srcdir/.."
+    cargo build --release
+}
+
+package() {
+    cd "$srcdir/.."
+    install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+}
