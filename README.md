@@ -8,6 +8,14 @@ A Qt-based graphical interface for managing [**Howdy**](https://github.com/boltg
 
 </p>
 
+## Hardware Requirements
+
+- **IR Camera**: A Windows Hello compatible infrared camera is required. Found in:
+  - Modern laptops (Dell, Lenovo ThinkPad, HP EliteBook, Microsoft Surface, etc.)
+  - External webcams (e.g., Logitech Brio)
+
+- **Supported Devices**: Your IR camera must be recognized by Linux and accessible via `/dev/video*`
+
 ## Testing (XeroLinux Only)
 
 This application is designed exclusively for **XeroLinux** and will not work on other distributions.
@@ -16,21 +24,13 @@ To test without installing the package:
 
 ```bash
 # Install dependencies
-sudo pacman -S rust cargo clang qt6-base qt6-declarative howdy
+sudo pacman -S rust cargo clang qt6-base qt6-declarative howdy-bin
 
 # Clone and run
 git clone https://github.com/XeroLinuxDev/xero-howdy-qt.git
 cd xero-howdy-qt
 cargo run
 ```
-
-## Hardware Requirements
-
-- **IR Camera**: A Windows Hello compatible infrared camera is required. Found in:
-  - Modern laptops (Dell, Lenovo ThinkPad, HP EliteBook, Microsoft Surface, etc.)
-  - External webcams (e.g., Logitech Brio)
-
-- **Supported Devices**: Your IR camera must be recognized by Linux and accessible via `/dev/video*`
 
 ## Usage
 
