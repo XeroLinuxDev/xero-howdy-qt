@@ -1,4 +1,4 @@
-# Howdy Qt
+# Xero Howdy Qt
 
 A Qt-based graphical interface for managing [**Howdy**](https://github.com/boltgolt/howdy) face authentication on Linux systems with Windows Hello compatible hardware.
 
@@ -7,6 +7,22 @@ A Qt-based graphical interface for managing [**Howdy**](https://github.com/boltg
 <img width="828" height="904" alt="image" src="https://github.com/user-attachments/assets/f9af80d4-e3cd-4fa5-978c-1936bcadd138" />
 
 </p>
+
+## Testing (XeroLinux Only)
+
+This application is designed exclusively for **XeroLinux** and will not work on other distributions.
+
+To test without installing the package:
+
+```bash
+# Install dependencies
+sudo pacman -S rust cargo clang qt6-base qt6-declarative howdy
+
+# Clone and run
+git clone https://github.com/XeroLinuxDev/xero-howdy-qt.git
+cd xero-howdy-qt
+cargo run
+```
 
 ## Hardware Requirements
 
