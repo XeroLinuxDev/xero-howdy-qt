@@ -16,7 +16,7 @@ A Qt-based graphical interface for managing [**Howdy**](https://github.com/boltg
 
 - **Supported Devices**: Your IR camera must be recognized by Linux and accessible via `/dev/video*`
 
-## Testing (XeroLinux Only)
+## Testing App
 
 This application is designed exclusively for **XeroLinux** and will not work on other distributions.
 
