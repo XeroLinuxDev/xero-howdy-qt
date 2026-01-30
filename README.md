@@ -2,6 +2,12 @@
 
 A Qt-based graphical interface for managing [**Howdy**](https://github.com/boltgolt/howdy) face authentication on Linux systems with Windows Hello compatible hardware.
 
+<p align="center">
+
+<img width="828" height="904" alt="image" src="https://github.com/user-attachments/assets/f9af80d4-e3cd-4fa5-978c-1936bcadd138" />
+
+</p>
+
 ## Hardware Requirements
 
 - **IR Camera**: A Windows Hello compatible infrared camera is required. Found in:
