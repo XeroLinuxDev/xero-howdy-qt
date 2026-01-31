@@ -4,7 +4,7 @@ A Qt-based graphical interface for managing [**Howdy**](https://github.com/boltg
 
 <p align="center">
 
-<img width="828" height="904" alt="image" src="https://github.com/user-attachments/assets/f9af80d4-e3cd-4fa5-978c-1936bcadd138" />
+<img width="598" height="653" alt="image" src="https://github.com/user-attachments/assets/7785ca98-c655-4d4c-99c3-2acfa4775159" />
 
 </p>
 
