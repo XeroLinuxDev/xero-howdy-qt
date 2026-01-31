@@ -50,8 +50,8 @@ ApplicationWindow {
             Label {
                 anchors.centerIn: parent
                 text: backend.deviceSupported
-                    ? "\u2705 IR Camera Detected - Ready to Use"
-                    : "\u26A0 No Compatible IR Camera Found"
+                    ? "● IR Camera Detected - Ready to Use"
+                    : "▲ No Compatible IR Camera Found"
                 color: "white"
                 font.pixelSize: 14
                 font.bold: true
@@ -60,7 +60,7 @@ ApplicationWindow {
 
         // Section header
         Label {
-            text: "\u{1F464} Registered Faces"
+            text: "Registered Faces"
             font.pixelSize: 20
             font.bold: true
         }
@@ -99,7 +99,7 @@ ApplicationWindow {
                         }
 
                         Button {
-                            text: "\u{1F5D1} Remove"
+                            text: "× Remove"
                             flat: true
                             onClicked: {
                                 var id = parseInt(modelData.trim().split(/\s+/)[0])
@@ -135,7 +135,7 @@ ApplicationWindow {
 
             Button {
                 id: addButton
-                text: "\u2795 Register Face"
+                text: "+ Register Face"
                 font.pixelSize: 15
                 highlighted: true
                 enabled: backend.deviceSupported
@@ -152,20 +152,20 @@ ApplicationWindow {
             spacing: 18
 
             Button {
-                text: "\u{1F504} Refresh"
+                text: "↻ Refresh"
                 font.pixelSize: 14
                 onClicked: backend.refreshModels()
             }
 
             Button {
-                text: "\u{1F9EA} Test Recognition"
+                text: "◎ Test Recognition"
                 font.pixelSize: 14
                 enabled: backend.deviceSupported
                 onClicked: backend.runTest()
             }
 
             Button {
-                text: backend.howdyEnabled ? "\u{1F6AB} Disable Howdy" : "\u2705 Enable Howdy"
+                text: backend.howdyEnabled ? "○ Disable Howdy" : "● Enable Howdy"
                 font.pixelSize: 14
                 onClicked: backend.toggleEnabled()
             }

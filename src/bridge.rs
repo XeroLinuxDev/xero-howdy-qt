@@ -57,13 +57,28 @@ pub struct HowdyBackendRust {
     device_supported: bool,
 }
 
+/// Check if howdy is disabled in config content
+fn is_howdy_disabled(config_content: &str) -> bool {
+    for line in config_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("disabled") {
+            if let Some(value) = trimmed.split('=').nth(1) {
+                let val = value.trim();
+                return val.eq_ignore_ascii_case("true") || val == "1";
+            }
+        }
+    }
+    false // Default: not disabled (enabled)
+}
+
 impl qobject::HowdyBackend {
     /// Check if device has a supported IR camera for howdy
     pub fn check_device(mut self: Pin<&mut Self>) {
         // Check multiple conditions for device support:
         // 1. Check if howdy is installed
-        // 2. Check if video devices exist
+        // 2. Use v4l2-ctl to detect video devices (per Arch Wiki)
         // 3. Check howdy config for device path
+        // 4. Prefer stable paths (/dev/v4l/by-path/) over /dev/videoX
 
         let mut supported = false;
         let mut status_msg = String::new();
@@ -82,32 +97,38 @@ impl qobject::HowdyBackend {
             return;
         }
 
-        // Check for video devices (IR cameras typically show up as /dev/video*)
-        let video_devices: Vec<_> = fs::read_dir("/dev")
-            .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.file_name()
-                            .to_string_lossy()
-                            .starts_with("video")
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Use v4l2-ctl to list devices (recommended by Arch Wiki)
+        let v4l2_output = Command::new("v4l2-ctl")
+            .arg("--list-devices")
+            .output();
 
-        if video_devices.is_empty() {
-            status_msg = "No video devices found".to_string();
+        let has_video_devices = match &v4l2_output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                !stdout.trim().is_empty()
+            }
+            _ => {
+                // Fallback: check /dev/v4l/by-path/ for stable device paths (per Arch Wiki)
+                Path::new("/dev/v4l/by-path").exists()
+                    && fs::read_dir("/dev/v4l/by-path")
+                        .map(|entries| entries.count() > 0)
+                        .unwrap_or(false)
+            }
+        };
+
+        if !has_video_devices {
+            status_msg = "No video devices found (install v4l-utils for better detection)".to_string();
             self.as_mut().set_device_supported(false);
             self.as_mut().set_status_message(QString::from(&status_msg));
             return;
         }
 
         // Check howdy config file for device_path
+        // Priority order per Arch Wiki: /lib/security/howdy/config.ini is the main config
         let config_paths = [
-            "/etc/howdy/config.ini",
-            "/usr/lib/security/howdy/config.ini",
             "/lib/security/howdy/config.ini",
+            "/usr/lib/security/howdy/config.ini",
+            "/etc/howdy/config.ini",
         ];
 
         let mut device_path_configured = false;
@@ -122,10 +143,16 @@ impl qobject::HowdyBackend {
                                 let device = value.trim();
                                 if !device.is_empty() && device != "none" && device != "null" {
                                     // Check if the configured device actually exists
+                                    // Supports both /dev/videoX and stable /dev/v4l/by-path/ paths
                                     if Path::new(device).exists() {
                                         device_path_configured = true;
                                         supported = true;
-                                        status_msg = format!("Device found: {}", device);
+                                        // Show friendly path info
+                                        if device.contains("/by-path/") || device.contains("/by-id/") {
+                                            status_msg = format!("Device configured (stable path): {}", device);
+                                        } else {
+                                            status_msg = format!("Device found: {}", device);
+                                        }
                                     } else {
                                         status_msg = format!("Configured device {} not found", device);
                                     }
@@ -134,15 +161,19 @@ impl qobject::HowdyBackend {
                             break;
                         }
                     }
+
+                    // Also check if howdy is disabled in config
+                    let howdy_enabled = !is_howdy_disabled(&content);
+                    self.as_mut().set_howdy_enabled(howdy_enabled);
                 }
                 break;
             }
         }
 
-        if !device_path_configured && !video_devices.is_empty() {
-            // Devices exist but may not be configured - still show as potentially supported
+        if !device_path_configured && has_video_devices {
+            // Devices exist but may not be configured
             supported = true;
-            status_msg = format!("Found {} video device(s) - may need configuration", video_devices.len());
+            status_msg = "Video device(s) found - run 'sudo howdy config' to set device_path".to_string();
         }
 
         self.as_mut().set_device_supported(supported);
@@ -158,13 +189,26 @@ impl qobject::HowdyBackend {
         match output {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
                 let mut models = QList::<QString>::default();
+
+                // Check for "No users registered" message (howdy outputs this when empty)
+                let combined = format!("{}{}", stdout, stderr).to_lowercase();
+                if combined.contains("no users") || combined.contains("no models") {
+                    self.as_mut().set_face_models(models);
+                    self.as_mut().set_status_message(QString::from("No faces registered"));
+                    return;
+                }
 
                 // Parse howdy list output - each line after header is a model
                 for line in stdout.lines() {
                     let trimmed = line.trim();
-                    // Skip empty lines and header lines
-                    if trimmed.is_empty() || trimmed.starts_with("ID") || trimmed.contains("──") {
+                    // Skip empty lines, header lines, and separator lines
+                    if trimmed.is_empty()
+                        || trimmed.starts_with("ID")
+                        || trimmed.contains("──")
+                        || trimmed.contains("---")
+                    {
                         continue;
                     }
                     // Parse lines like: "0  model_name  2024-01-15"
@@ -175,8 +219,16 @@ impl qobject::HowdyBackend {
                     }
                 }
 
+                let count = models.len();
                 self.as_mut().set_face_models(models);
-                self.as_mut().set_status_message(QString::from("Models refreshed"));
+                if count > 0 {
+                    self.as_mut().set_status_message(QString::from(&format!(
+                        "Found {} registered face(s)",
+                        count
+                    )));
+                } else {
+                    self.as_mut().set_status_message(QString::from("No faces registered"));
+                }
             }
             Err(e) => {
                 self.as_mut().set_status_message(QString::from(&format!("Error: {}", e)));
