@@ -24,7 +24,7 @@ To test without installing the package:
 
 ```bash
 # Install dependencies
-sudo pacman -S rust cargo clang qt6-base qt6-declarative howdy-bin
+sudo pacman -S rust clang qt6-base qt6-declarative howdy-bin
 
 # Clone and run
 git clone https://github.com/XeroLinuxDev/xero-howdy-qt.git
