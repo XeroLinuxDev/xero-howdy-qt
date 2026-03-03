@@ -13,8 +13,88 @@ ApplicationWindow {
     HowdyBackend {
         id: backend
         Component.onCompleted: {
-            checkDevice()
-            refreshModels()
+            backend.load_video_devices()
+            backend.check_pam_status()
+            if (!backend.camera_configured) {
+                cameraDialog.open()
+            } else {
+                backend.check_device()
+                backend.refresh_models()
+            }
+        }
+    }
+
+    Dialog {
+        id: cameraDialog
+        title: "Select IR Camera"
+        modal: true
+        closePolicy: Popup.NoAutoClose
+        anchors.centerIn: Overlay.overlay
+        width: 540
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 16
+
+            Label {
+                Layout.fillWidth: true
+                text: "Select the IR camera device to use for face recognition:"
+                font.pixelSize: 14
+                wrapMode: Text.Wrap
+            }
+
+            ComboBox {
+                id: devicePicker
+                Layout.fillWidth: true
+                model: backend.video_devices
+                font.pixelSize: 14
+            }
+
+            Label {
+                Layout.fillWidth: true
+                text: "No video devices found in /dev/"
+                visible: devicePicker.count === 0
+                color: palette.placeholderText
+                font.italic: true
+                font.pixelSize: 13
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                Button {
+                    text: "▶ Test Camera"
+                    font.pixelSize: 14
+                    enabled: devicePicker.count > 0
+                    onClicked: backend.test_camera(devicePicker.currentText)
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: "Skip"
+                    font.pixelSize: 14
+                    onClicked: {
+                        cameraDialog.close()
+                        backend.check_device()
+                        backend.refresh_models()
+                    }
+                }
+
+                Button {
+                    text: "Save & Continue"
+                    font.pixelSize: 14
+                    highlighted: true
+                    enabled: devicePicker.count > 0
+                    onClicked: {
+                        backend.save_device_path(devicePicker.currentText)
+                        cameraDialog.close()
+                        backend.check_device()
+                        backend.refresh_models()
+                    }
+                }
+            }
         }
     }
 
@@ -45,11 +125,11 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.preferredHeight: 32
             radius: 8
-            color: backend.deviceSupported ? "#2e7d32" : "#c62828"
+            color: backend.device_supported ? "#2e7d32" : "#c62828"
 
             Label {
                 anchors.centerIn: parent
-                text: backend.deviceSupported
+                text: backend.device_supported
                     ? "● IR Camera Detected - Ready to Use"
                     : "▲ No Compatible IR Camera Found"
                 color: "white"
@@ -78,7 +158,7 @@ ApplicationWindow {
                 id: modelList
                 anchors.fill: parent
                 anchors.margins: 14
-                model: backend.faceModels
+                model: backend.face_models
                 clip: true
                 spacing: 6
 
@@ -103,7 +183,7 @@ ApplicationWindow {
                             flat: true
                             onClicked: {
                                 var id = parseInt(modelData.trim().split(/\s+/)[0])
-                                backend.removeModel(id)
+                                backend.remove_model(id)
                             }
                         }
                     }
@@ -138,9 +218,9 @@ ApplicationWindow {
                 text: "+ Register Face"
                 font.pixelSize: 15
                 highlighted: true
-                enabled: backend.deviceSupported
+                enabled: backend.device_supported
                 onClicked: {
-                    backend.addModel(newModelName.text)
+                    backend.add_model(newModelName.text)
                     newModelName.text = ""
                 }
             }
@@ -154,20 +234,95 @@ ApplicationWindow {
             Button {
                 text: "↻ Refresh"
                 font.pixelSize: 14
-                onClicked: backend.refreshModels()
+                onClicked: backend.refresh_models()
             }
 
             Button {
                 text: "◎ Test Recognition"
                 font.pixelSize: 14
-                enabled: backend.deviceSupported
-                onClicked: backend.runTest()
+                enabled: backend.device_supported
+                onClicked: backend.run_test()
             }
 
             Button {
-                text: backend.howdyEnabled ? "○ Disable Howdy" : "● Enable Howdy"
+                text: backend.howdy_enabled ? "○ Disable Howdy" : "● Enable Howdy"
                 font.pixelSize: 14
-                onClicked: backend.toggleEnabled()
+                onClicked: backend.toggle_enabled()
+            }
+        }
+
+        // PAM authentication toggles
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: pamColumn.implicitHeight + 28
+            color: palette.alternateBase
+            radius: 10
+
+            ColumnLayout {
+                id: pamColumn
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: 14 }
+                spacing: 0
+
+                Label {
+                    text: "PAM Authentication"
+                    font.pixelSize: 15
+                    font.bold: true
+                    Layout.bottomMargin: 10
+                }
+
+                // SDDM login screen
+                RowLayout {
+                    Layout.fillWidth: true
+                    Column {
+                        spacing: 2
+                        Label { text: "SDDM Login Screen"; font.pixelSize: 14; font.bold: true }
+                        Label { text: "Unlock the display manager login screen with your face"; font.pixelSize: 12; color: palette.placeholderText }
+                    }
+                    Item { Layout.fillWidth: true }
+                    Switch { checked: backend.pam_sddm; onToggled: backend.toggle_pam("/etc/pam.d/sddm") }
+                }
+
+                Rectangle { Layout.fillWidth: true; height: 1; color: palette.mid; opacity: 0.4; Layout.topMargin: 4; Layout.bottomMargin: 4 }
+
+                // KDE screen lock
+                RowLayout {
+                    Layout.fillWidth: true
+                    Column {
+                        spacing: 2
+                        Label { text: "KDE Screen Lock"; font.pixelSize: 14; font.bold: true }
+                        Label { text: "Unlock the KDE screen locker without typing your password"; font.pixelSize: 12; color: palette.placeholderText }
+                    }
+                    Item { Layout.fillWidth: true }
+                    Switch { checked: backend.pam_kde; onToggled: backend.toggle_pam("/etc/pam.d/kde") }
+                }
+
+                Rectangle { Layout.fillWidth: true; height: 1; color: palette.mid; opacity: 0.4; Layout.topMargin: 4; Layout.bottomMargin: 4 }
+
+                // sudo
+                RowLayout {
+                    Layout.fillWidth: true
+                    Column {
+                        spacing: 2
+                        Label { text: "sudo (Terminal)"; font.pixelSize: 14; font.bold: true }
+                        Label { text: "Run sudo commands without typing your password"; font.pixelSize: 12; color: palette.placeholderText }
+                    }
+                    Item { Layout.fillWidth: true }
+                    Switch { checked: backend.pam_sudo; onToggled: backend.toggle_pam("/etc/pam.d/sudo") }
+                }
+
+                Rectangle { Layout.fillWidth: true; height: 1; color: palette.mid; opacity: 0.4; Layout.topMargin: 4; Layout.bottomMargin: 4 }
+
+                // system-local-login
+                RowLayout {
+                    Layout.fillWidth: true
+                    Column {
+                        spacing: 2
+                        Label { text: "System Local Login"; font.pixelSize: 14; font.bold: true }
+                        Label { text: "General TTY and local system login authentication"; font.pixelSize: 12; color: palette.placeholderText }
+                    }
+                    Item { Layout.fillWidth: true }
+                    Switch { checked: backend.pam_system_login; onToggled: backend.toggle_pam("/etc/pam.d/system-local-login") }
+                }
             }
         }
 
@@ -181,7 +336,7 @@ ApplicationWindow {
             Label {
                 anchors.centerIn: parent
                 width: parent.width - 24
-                text: backend.statusMessage
+                text: backend.status_message
                 elide: Text.ElideRight
                 horizontalAlignment: Text.AlignHCenter
                 color: palette.text
