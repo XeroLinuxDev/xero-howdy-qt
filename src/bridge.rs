@@ -12,9 +12,15 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[qproperty(QList_QString, face_models)]
+        #[qproperty(QList_QString, video_devices)]
         #[qproperty(QString, status_message)]
         #[qproperty(bool, howdy_enabled)]
         #[qproperty(bool, device_supported)]
+        #[qproperty(bool, camera_configured)]
+        #[qproperty(bool, pam_sddm)]
+        #[qproperty(bool, pam_kde)]
+        #[qproperty(bool, pam_sudo)]
+        #[qproperty(bool, pam_system_login)]
         type HowdyBackend = super::HowdyBackendRust;
 
         /// Check if device has supported IR camera
@@ -40,6 +46,26 @@ pub mod qobject {
         /// Run a test of face recognition
         #[qinvokable]
         fn run_test(self: Pin<&mut HowdyBackend>);
+
+        /// Scan /dev/ for video* devices and populate video_devices
+        #[qinvokable]
+        fn load_video_devices(self: Pin<&mut HowdyBackend>);
+
+        /// Preview a device with mpv
+        #[qinvokable]
+        fn test_camera(self: Pin<&mut HowdyBackend>, device: QString);
+
+        /// Write device_path into the howdy config file
+        #[qinvokable]
+        fn save_device_path(self: Pin<&mut HowdyBackend>, device: QString);
+
+        /// Read all PAM files and update the pam_* properties
+        #[qinvokable]
+        fn check_pam_status(self: Pin<&mut HowdyBackend>);
+
+        /// Add, uncomment or comment the howdy line in the given PAM file
+        #[qinvokable]
+        fn toggle_pam(self: Pin<&mut HowdyBackend>, file: QString);
     }
 }
 
@@ -52,9 +78,56 @@ use std::process::Command;
 #[derive(Default)]
 pub struct HowdyBackendRust {
     face_models: QList<QString>,
+    video_devices: QList<QString>,
     status_message: QString,
     howdy_enabled: bool,
     device_supported: bool,
+    camera_configured: bool,
+    pam_sddm: bool,
+    pam_kde: bool,
+    pam_sudo: bool,
+    pam_system_login: bool,
+}
+
+
+const PAM_LINE: &str = "auth sufficient pam_howdy.so";
+const PAM_SDDM:         &str = "/etc/pam.d/sddm";
+const PAM_KDE:          &str = "/etc/pam.d/kde";
+const PAM_SUDO:         &str = "/etc/pam.d/sudo";
+const PAM_SYSTEM_LOGIN: &str = "/etc/pam.d/system-local-login";
+
+/// Returns true if a non-commented howdy auth line is present in the PAM file content
+fn pam_howdy_active(content: &str) -> bool {
+    content.lines().any(|line| {
+        let t = line.trim();
+        !t.starts_with('#') && (t.contains("pam_howdy.so") || t.contains("howdy/pam.py"))
+    })
+}
+
+/// Run a program as root via pkexec, forwarding display variables so GUI/camera output works
+fn pkexec_with_display(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut cmd = Command::new("pkexec");
+    cmd.arg("/usr/bin/env");
+    for var in &["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"] {
+        if let Ok(val) = std::env::var(var) {
+            if !val.is_empty() {
+                cmd.arg(format!("{}={}", var, val));
+            }
+        }
+    }
+    cmd.arg(program).args(args).output()
+}
+
+/// Resolve the absolute path to the howdy binary
+fn find_howdy() -> Option<String> {
+    Command::new("which")
+        .arg("howdy")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Check if howdy is disabled in config content
@@ -182,9 +255,14 @@ impl qobject::HowdyBackend {
 
     /// Refresh the list of face models from howdy
     pub fn refresh_models(mut self: Pin<&mut Self>) {
-        let output = Command::new("pkexec")
-            .args(["howdy", "list"])
-            .output();
+        let howdy = match find_howdy() {
+            Some(p) => p,
+            None => {
+                self.as_mut().set_status_message(QString::from("Howdy is not installed"));
+                return;
+            }
+        };
+        let output = Command::new("pkexec").args([&howdy, "list"]).output();
 
         match output {
             Ok(out) => {
@@ -244,12 +322,18 @@ impl qobject::HowdyBackend {
             return;
         }
 
+        let howdy = match find_howdy() {
+            Some(p) => p,
+            None => {
+                self.as_mut().set_status_message(QString::from("Howdy is not installed"));
+                return;
+            }
+        };
+
         self.as_mut().set_status_message(QString::from("Adding model... Look at the camera"));
 
         // Note: This runs in blocking mode. For better UX, this should be async
-        let output = Command::new("pkexec")
-            .args(["howdy", "add", "-y", &name_str])
-            .output();
+        let output = pkexec_with_display(&howdy, &["add", "-y", &name_str]);
 
         match output {
             Ok(out) => {
@@ -257,8 +341,15 @@ impl qobject::HowdyBackend {
                     self.as_mut().set_status_message(QString::from("Model added successfully"));
                     self.refresh_models();
                 } else {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    self.as_mut().set_status_message(QString::from(&format!("Failed: {}", stderr)));
+                    let combined = format!("{}{}", stdout, stderr).trim().to_string();
+                    let msg = if combined.is_empty() {
+                        format!("Failed (exit code: {:?})", out.status.code())
+                    } else {
+                        format!("Failed: {}", combined)
+                    };
+                    self.as_mut().set_status_message(QString::from(&msg));
                 }
             }
             Err(e) => {
@@ -269,9 +360,14 @@ impl qobject::HowdyBackend {
 
     /// Remove a face model by its ID
     pub fn remove_model(mut self: Pin<&mut Self>, index: i32) {
-        let output = Command::new("pkexec")
-            .args(["howdy", "remove", "-y", &index.to_string()])
-            .output();
+        let howdy = match find_howdy() {
+            Some(p) => p,
+            None => {
+                self.as_mut().set_status_message(QString::from("Howdy is not installed"));
+                return;
+            }
+        };
+        let output = Command::new("pkexec").args([&howdy, "remove", "-y", &index.to_string()]).output();
 
         match output {
             Ok(out) => {
@@ -291,12 +387,17 @@ impl qobject::HowdyBackend {
 
     /// Toggle howdy enabled/disabled
     pub fn toggle_enabled(mut self: Pin<&mut Self>) {
+        let howdy = match find_howdy() {
+            Some(p) => p,
+            None => {
+                self.as_mut().set_status_message(QString::from("Howdy is not installed"));
+                return;
+            }
+        };
         let current = *self.as_ref().howdy_enabled();
         let arg = if current { "1" } else { "0" };
 
-        let output = Command::new("pkexec")
-            .args(["howdy", "disable", arg])
-            .output();
+        let output = Command::new("pkexec").args([&howdy, "disable", arg]).output();
 
         match output {
             Ok(out) => {
@@ -315,13 +416,277 @@ impl qobject::HowdyBackend {
         }
     }
 
+    /// Scan /dev/ for video* devices and check if howdy's device_path is already configured
+    pub fn load_video_devices(mut self: Pin<&mut Self>) {
+        let mut device_list: Vec<String> = fs::read_dir("/dev")
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("video") {
+                    Some(format!("/dev/{}", name))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        device_list.sort();
+
+        let mut devices = QList::<QString>::default();
+        for d in &device_list {
+            devices.append_clone(&QString::from(d.as_str()));
+        }
+        self.as_mut().set_video_devices(devices);
+
+        // Check if device_path is already set to something other than "none" in the config
+        let config_candidates = [
+            "/usr/lib/security/howdy/config.ini",
+            "/lib/security/howdy/config.ini",
+            "/etc/howdy/config.ini",
+        ];
+        let mut configured = false;
+        for candidate in &config_candidates {
+            if let Ok(content) = fs::read_to_string(candidate) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.starts_with('#') && trimmed.starts_with("device_path") {
+                        if let Some(value) = trimmed.split('=').nth(1) {
+                            let device = value.trim();
+                            if !device.is_empty() && device != "none" && device != "null" {
+                                configured = true;
+                            }
+                        }
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        self.as_mut().set_camera_configured(configured);
+    }
+
+    /// Launch mpv to preview the selected camera device
+    pub fn test_camera(mut self: Pin<&mut Self>, device: QString) {
+        let device_str = device.to_string();
+        if device_str.is_empty() {
+            self.as_mut().set_status_message(QString::from("No device selected"));
+            return;
+        }
+        match Command::new("mpv").arg(&device_str).spawn() {
+            Ok(_) => {
+                self.as_mut().set_status_message(
+                    QString::from(&format!("Previewing {} — close mpv when done", device_str))
+                );
+            }
+            Err(e) => {
+                self.as_mut().set_status_message(
+                    QString::from(&format!("Failed to launch mpv: {}", e))
+                );
+            }
+        }
+    }
+
+    /// Write device_path into the howdy config file using pkexec
+    pub fn save_device_path(mut self: Pin<&mut Self>, device: QString) {
+        let device_str = device.to_string();
+        if device_str.is_empty() {
+            self.as_mut().set_status_message(QString::from("No device selected"));
+            return;
+        }
+
+        let config_candidates = [
+            "/usr/lib/security/howdy/config.ini",
+            "/lib/security/howdy/config.ini",
+            "/etc/howdy/config.ini",
+        ];
+
+        let mut config_path: Option<&str> = None;
+        let mut current_content = String::new();
+        for candidate in &config_candidates {
+            if Path::new(candidate).exists() {
+                if let Ok(content) = fs::read_to_string(candidate) {
+                    current_content = content;
+                    config_path = Some(candidate);
+                    break;
+                }
+            }
+        }
+
+        let config_path = match config_path {
+            Some(p) => p,
+            None => {
+                self.as_mut().set_status_message(QString::from("Howdy config not found"));
+                return;
+            }
+        };
+
+        // Replace the device_path line, or append it if absent
+        let mut found = false;
+        let mut lines: Vec<String> = current_content
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('#') && trimmed.starts_with("device_path") {
+                    found = true;
+                    format!("device_path = {}", device_str)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+        if !found {
+            lines.push(format!("device_path = {}", device_str));
+        }
+        let new_content = lines.join("\n") + "\n";
+
+        // Write to a temp file, then copy it with elevated privileges
+        let tmp = "/tmp/howdy_config_tmp.ini";
+        if let Err(e) = fs::write(tmp, &new_content) {
+            self.as_mut().set_status_message(
+                QString::from(&format!("Failed to write temp file: {}", e))
+            );
+            return;
+        }
+
+        let output = Command::new("pkexec").args(["/usr/bin/cp", tmp, config_path]).output();
+        let _ = fs::remove_file(tmp);
+
+        match output {
+            Ok(out) if out.status.success() => {
+                self.as_mut().set_status_message(
+                    QString::from(&format!("Camera saved: {}", device_str))
+                );
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                self.as_mut().set_status_message(
+                    QString::from(&format!("Failed to save: {}", stderr))
+                );
+            }
+            Err(e) => {
+                self.as_mut().set_status_message(
+                    QString::from(&format!("Error: {}", e))
+                );
+            }
+        }
+    }
+
+    /// Read all four PAM files and update the corresponding properties
+    pub fn check_pam_status(mut self: Pin<&mut Self>) {
+        let read = |p| fs::read_to_string(p).map(|c| pam_howdy_active(&c)).unwrap_or(false);
+        self.as_mut().set_pam_sddm(read(PAM_SDDM));
+        self.as_mut().set_pam_kde(read(PAM_KDE));
+        self.as_mut().set_pam_sudo(read(PAM_SUDO));
+        self.as_mut().set_pam_system_login(read(PAM_SYSTEM_LOGIN));
+    }
+
+    /// Toggle the howdy line in the given PAM file path:
+    ///   off → on : uncomment existing commented line, or insert a new one
+    ///   on  → off: comment out the active line
+    pub fn toggle_pam(mut self: Pin<&mut Self>, file: QString) {
+        let file_path = file.to_string();
+
+        let content = match fs::read_to_string(&file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.as_mut().set_status_message(
+                    QString::from(&format!("Cannot read {}: {}", file_path, e))
+                );
+                return;
+            }
+        };
+
+        let currently_enabled = pam_howdy_active(&content);
+
+        let new_content = if currently_enabled {
+            // Disable: comment out every active howdy auth line
+            content.lines().map(|line| {
+                let t = line.trim();
+                if !t.starts_with('#') && (t.contains("pam_howdy.so") || t.contains("howdy/pam.py")) {
+                    format!("#{}", line)
+                } else {
+                    line.to_string()
+                }
+            }).collect::<Vec<_>>().join("\n") + "\n"
+        } else {
+            let has_commented = content.lines().any(|line| {
+                let t = line.trim();
+                t.starts_with('#') && (t.contains("pam_howdy.so") || t.contains("howdy/pam.py"))
+            });
+            if has_commented {
+                // Uncomment: strip leading # and optional space
+                content.lines().map(|line| {
+                    let t = line.trim();
+                    if t.starts_with('#') && (t.contains("pam_howdy.so") || t.contains("howdy/pam.py")) {
+                        t.strip_prefix('#').unwrap_or(t).trim_start().to_string()
+                    } else {
+                        line.to_string()
+                    }
+                }).collect::<Vec<_>>().join("\n") + "\n"
+            } else {
+                // Insert after #%PAM-1.0 header if present, otherwise at the top
+                let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+                let pos = if lines.first().map(|l| l.starts_with("#%PAM-1.0")).unwrap_or(false) { 1 } else { 0 };
+                lines.insert(pos, PAM_LINE.to_string());
+                lines.join("\n") + "\n"
+            }
+        };
+
+        let tmp = "/tmp/howdy_pam_tmp";
+        if let Err(e) = fs::write(tmp, &new_content) {
+            self.as_mut().set_status_message(
+                QString::from(&format!("Failed to write temp file: {}", e))
+            );
+            return;
+        }
+
+        let output = Command::new("pkexec").args(["/usr/bin/cp", tmp, file_path.as_str()]).output();
+        let _ = fs::remove_file(tmp);
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let new_state = !currently_enabled;
+                let fname = file_path.rsplit('/').next().unwrap_or(&file_path);
+                let msg = if new_state {
+                    format!("Howdy enabled in {}", fname)
+                } else {
+                    format!("Howdy disabled in {}", fname)
+                };
+                // Update the property that corresponds to this file
+                match file_path.as_str() {
+                    PAM_SDDM         => self.as_mut().set_pam_sddm(new_state),
+                    PAM_KDE          => self.as_mut().set_pam_kde(new_state),
+                    PAM_SUDO         => self.as_mut().set_pam_sudo(new_state),
+                    PAM_SYSTEM_LOGIN => self.as_mut().set_pam_system_login(new_state),
+                    _                => {}
+                }
+                self.as_mut().set_status_message(QString::from(&msg));
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                self.as_mut().set_status_message(
+                    QString::from(&format!("Failed to update PAM: {}", stderr))
+                );
+            }
+            Err(e) => {
+                self.as_mut().set_status_message(QString::from(&format!("Error: {}", e)));
+            }
+        }
+    }
+
     /// Run face recognition test
     pub fn run_test(mut self: Pin<&mut Self>) {
+        let howdy = match find_howdy() {
+            Some(p) => p,
+            None => {
+                self.as_mut().set_status_message(QString::from("Howdy is not installed"));
+                return;
+            }
+        };
         self.as_mut().set_status_message(QString::from("Running test... Look at the camera"));
 
-        let output = Command::new("pkexec")
-            .args(["howdy", "test"])
-            .output();
+        let output = pkexec_with_display(&howdy, &["test"]);
 
         match output {
             Ok(out) => {
