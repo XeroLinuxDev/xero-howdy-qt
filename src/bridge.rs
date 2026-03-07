@@ -22,6 +22,7 @@ pub mod qobject {
         #[qproperty(bool, pam_sudo)]
         #[qproperty(bool, pam_system_login)]
         #[qproperty(bool, pam_plasma_lm)]
+        #[qproperty(bool, pam_polkit)]
         #[qproperty(bool, sddm_installed)]
         #[qproperty(bool, plasma_lm_installed)]
         #[qproperty(QString, app_version)]
@@ -104,6 +105,7 @@ pub struct HowdyBackendRust {
     pam_sudo: bool,
     pam_system_login: bool,
     pam_plasma_lm: bool,
+    pam_polkit: bool,
     sddm_installed: bool,
     plasma_lm_installed: bool,
     app_version: QString,
@@ -115,6 +117,9 @@ const PAM_KDE: &str = "/etc/pam.d/kde";
 const PAM_SUDO: &str = "/etc/pam.d/sudo";
 const PAM_SYSTEM_LOGIN: &str = "/etc/pam.d/system-local-login";
 const PAM_PLASMA_LM: &str = "/etc/pam.d/plasmalogin";
+const PAM_POLKIT: &str = "/etc/pam.d/polkit-1";
+// polkit-agent-helper resolves PAM modules in a restricted sandbox; use the full path.
+const PAM_POLKIT_LINE: &str = "auth sufficient /lib/security/pam_howdy.so";
 
 /// Returns true if a non-commented howdy auth line is present in the PAM file content
 fn pam_howdy_active(content: &str) -> bool {
@@ -124,17 +129,8 @@ fn pam_howdy_active(content: &str) -> bool {
     })
 }
 
-fn pkexec_with_display(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
-    let mut cmd = Command::new("pkexec");
-    cmd.arg("/usr/bin/env");
-    for var in &["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"] {
-        if let Ok(val) = std::env::var(var) {
-            if !val.is_empty() {
-                cmd.arg(format!("{}={}", var, val));
-            }
-        }
-    }
-    cmd.arg(program).args(args).output()
+fn pkexec_run(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    Command::new("pkexec").arg(program).args(args).output()
 }
 
 /// Resolve the absolute path to the howdy binary
@@ -176,7 +172,7 @@ impl qobject::HowdyBackend {
     /// Detect which display managers are present and set the corresponding properties.
     /// Falls back to showing SDDM if neither is found.
     pub fn detect_display_managers(mut self: Pin<&mut Self>) {
-        let version = std::env::var("APP_VERSION").unwrap_or_else(|_| "0.1.3".to_string());
+        let version = env!("APP_VERSION").to_string();
         self.as_mut().set_app_version(QString::from(&version));
 
         let sddm = Path::new("/usr/bin/sddm").exists() || pacman_installed("sddm");
@@ -406,7 +402,7 @@ impl qobject::HowdyBackend {
         let name_clone = name_str.clone();
 
         std::thread::spawn(move || {
-            let output = pkexec_with_display(&howdy_clone, &["add", "-y", &name_clone]);
+            let output = pkexec_run(&howdy_clone, &["add", "-y", &name_clone]);
 
             let result_msg = match output {
                 Ok(out) if out.status.success() => {
@@ -718,6 +714,7 @@ impl qobject::HowdyBackend {
         self.as_mut().set_pam_sudo(read(PAM_SUDO));
         self.as_mut().set_pam_system_login(read(PAM_SYSTEM_LOGIN));
         self.as_mut().set_pam_plasma_lm(read(PAM_PLASMA_LM));
+        self.as_mut().set_pam_polkit(read(PAM_POLKIT));
     }
 
     /// Toggle the howdy line in the given PAM file path:
@@ -770,6 +767,28 @@ impl qobject::HowdyBackend {
                 .collect::<Vec<_>>()
                 .join("\n")
                 + "\n"
+        } else if file_path.as_str() == PAM_POLKIT {
+            // For polkit: always use the full module path and remove any pre-existing
+            // howdy lines (commented or active) to produce a clean, canonical file.
+            let mut lines: Vec<String> = content
+                .lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.contains("pam_howdy.so") && !t.contains("howdy/pam.py")
+                })
+                .map(|l| l.to_string())
+                .collect();
+            let pos = if lines
+                .first()
+                .map(|l| l.starts_with("#%PAM-1.0"))
+                .unwrap_or(false)
+            {
+                1
+            } else {
+                0
+            };
+            lines.insert(pos, PAM_POLKIT_LINE.to_string());
+            lines.join("\n") + "\n"
         } else {
             let has_commented = content.lines().any(|line| {
                 let t = line.trim();
@@ -816,6 +835,68 @@ impl qobject::HowdyBackend {
             return;
         }
 
+        // polkit needs its systemd service sandbox relaxed so pam_howdy can open the
+        // camera (/dev/video*).  polkit-agent-helper@.service ships with PrivateDevices=yes
+        // which hides all devices — compare.py sees an empty /dev and captures 0 frames.
+        // We do everything in one pkexec bash invocation to avoid multiple auth dialogs.
+        if file_path.as_str() == PAM_POLKIT {
+            let output = if !currently_enabled {
+                let override_content =
+                    "[Service]\nPrivateDevices=no\nDeviceAllow=char-video4linux rw\n";
+                let _ = fs::write("/tmp/howdy_polkit_override.conf", override_content);
+                let howdy = find_howdy().unwrap_or_else(|| "/usr/bin/howdy".to_string());
+                let script = format!(
+                    "cp /tmp/howdy_pam_tmp /etc/pam.d/polkit-1 && \
+                     {h} set warn_no_device false && \
+                     {h} set timeout_notice false && \
+                     {h} set timeout 10 && \
+                     mkdir -p '/etc/systemd/system/polkit-agent-helper@.service.d' && \
+                     cp /tmp/howdy_polkit_override.conf \
+                        '/etc/systemd/system/polkit-agent-helper@.service.d/override.conf' && \
+                     systemctl daemon-reload && \
+                     systemctl restart polkit-agent-helper.socket",
+                    h = howdy
+                );
+                Command::new("pkexec")
+                    .args(["/usr/bin/bash", "-c", &script])
+                    .output()
+            } else {
+                let script =
+                    "cp /tmp/howdy_pam_tmp /etc/pam.d/polkit-1 && \
+                     rm -f '/etc/systemd/system/polkit-agent-helper@.service.d/override.conf' && \
+                     systemctl daemon-reload && \
+                     systemctl restart polkit-agent-helper.socket";
+                Command::new("pkexec")
+                    .args(["/usr/bin/bash", "-c", script])
+                    .output()
+            };
+            let _ = fs::remove_file(tmp);
+            let _ = fs::remove_file("/tmp/howdy_polkit_override.conf");
+            match output {
+                Ok(out) if out.status.success() => {
+                    self.as_mut().set_pam_polkit(!currently_enabled);
+                    let msg = if !currently_enabled {
+                        "Howdy enabled for polkit (camera sandbox configured)"
+                    } else {
+                        "Howdy disabled for polkit"
+                    };
+                    self.as_mut().set_status_message(QString::from(msg));
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    self.as_mut().set_status_message(QString::from(&format!(
+                        "Failed to configure polkit: {}",
+                        stderr
+                    )));
+                }
+                Err(e) => {
+                    self.as_mut()
+                        .set_status_message(QString::from(&format!("Error: {}", e)));
+                }
+            }
+            return;
+        }
+
         let output = Command::new("pkexec")
             .args(["/usr/bin/cp", tmp, file_path.as_str()])
             .output();
@@ -830,7 +911,6 @@ impl qobject::HowdyBackend {
                 } else {
                     format!("Howdy disabled in {}", fname)
                 };
-                // Update the property that corresponds to this file
                 match file_path.as_str() {
                     PAM_SDDM => self.as_mut().set_pam_sddm(new_state),
                     PAM_KDE => self.as_mut().set_pam_kde(new_state),
@@ -868,7 +948,7 @@ impl qobject::HowdyBackend {
         self.as_mut()
             .set_status_message(QString::from("Running test... Look at the camera"));
 
-        let output = pkexec_with_display(&howdy, &["test"]);
+        let output = pkexec_run(&howdy, &["test"]);
 
         match output {
             Ok(out) => {

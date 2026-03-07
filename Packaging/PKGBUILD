@@ -1,7 +1,7 @@
 # Maintainer: xero <x@xero.dev>
 
 pkgname=xero-howdy-qt
-pkgver=0.1.4
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Qt GUI for managing Howdy face authentication on Windows Hello supported devices"
 arch=('x86_64')
@@ -24,4 +24,5 @@ package() {
     install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
     install -Dm644 "Packaging/camera.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
     install -Dm644 "Packaging/$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+    install -Dm644 "Packaging/dev.xerolinux.$pkgname.policy" "$pkgdir/usr/share/polkit-1/actions/dev.xerolinux.$pkgname.policy"
 }

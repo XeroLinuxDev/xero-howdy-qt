@@ -634,6 +634,19 @@ ApplicationWindow {
                     }
 
                     Rectangle { Layout.fillWidth: true; height: 1; color: palette.mid; opacity: 0.4; Layout.topMargin: 4; Layout.bottomMargin: 4 }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Column {
+                            spacing: 2
+                            Label { text: "pkexec / Polkit"; font.pixelSize: 14; font.bold: true }
+                            Label { text: "Authenticate polkit and pkexec prompts with your face"; font.pixelSize: 12; color: palette.placeholderText }
+                        }
+                        Item { Layout.fillWidth: true }
+                        Switch { checked: backend.pam_polkit; onToggled: backend.toggle_pam("/etc/pam.d/polkit-1") }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: palette.mid; opacity: 0.4; Layout.topMargin: 4; Layout.bottomMargin: 4 }
                 }
             }
         }
