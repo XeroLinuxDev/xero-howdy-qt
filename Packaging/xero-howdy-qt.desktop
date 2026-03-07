@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Xero Howdy Qt
+Comment=Qt GUI for managing Howdy face authentication
+Exec=xero-howdy-qt
+Icon=xero-howdy-qt
+Terminal=false
+Type=Application
+Categories=System;Settings;
+Keywords=howdy;face;authentication;camera;
