@@ -9,6 +9,7 @@ url="https://github.com/XeroLinuxDev/xero-howdy-qt"
 license=('MIT')
 depends=('qt6-base' 'qt6-declarative' 'howdy-git' 'polkit' 'v4l-utils')
 makedepends=('rust' 'cargo' 'clang')
+options=(!lto)
 source=()
 sha256sums=()
 
