@@ -21,6 +21,10 @@ pub mod qobject {
         #[qproperty(bool, pam_kde)]
         #[qproperty(bool, pam_sudo)]
         #[qproperty(bool, pam_system_login)]
+        #[qproperty(bool, pam_plasma_lm)]
+        #[qproperty(bool, sddm_installed)]
+        #[qproperty(bool, plasma_lm_installed)]
+        #[qproperty(QString, app_version)]
         type HowdyBackend = super::HowdyBackendRust;
 
         /// Check if device has supported IR camera
@@ -31,9 +35,17 @@ pub mod qobject {
         #[qinvokable]
         fn refresh_models(self: Pin<&mut HowdyBackend>);
 
-        /// Add a new face model with the given name
+        /// Add a new face model with the given name (async)
         #[qinvokable]
         fn add_model(self: Pin<&mut HowdyBackend>, name: QString);
+
+        /// Check for pending add_model result from the background thread
+        #[qinvokable]
+        fn check_add_result(self: Pin<&mut HowdyBackend>) -> bool;
+
+        /// Discard the just-registered face (delete it)
+        #[qinvokable]
+        fn discard_face(self: Pin<&mut HowdyBackend>);
 
         /// Remove a face model by index
         #[qinvokable]
@@ -66,6 +78,10 @@ pub mod qobject {
         /// Add, uncomment or comment the howdy line in the given PAM file
         #[qinvokable]
         fn toggle_pam(self: Pin<&mut HowdyBackend>, file: QString);
+
+        /// Detect which display managers (SDDM / plasma-login-manager) are installed
+        #[qinvokable]
+        fn detect_display_managers(self: Pin<&mut HowdyBackend>);
     }
 }
 
@@ -87,14 +103,18 @@ pub struct HowdyBackendRust {
     pam_kde: bool,
     pam_sudo: bool,
     pam_system_login: bool,
+    pam_plasma_lm: bool,
+    sddm_installed: bool,
+    plasma_lm_installed: bool,
+    app_version: QString,
 }
 
-
 const PAM_LINE: &str = "auth sufficient pam_howdy.so";
-const PAM_SDDM:         &str = "/etc/pam.d/sddm";
-const PAM_KDE:          &str = "/etc/pam.d/kde";
-const PAM_SUDO:         &str = "/etc/pam.d/sudo";
+const PAM_SDDM: &str = "/etc/pam.d/sddm";
+const PAM_KDE: &str = "/etc/pam.d/kde";
+const PAM_SUDO: &str = "/etc/pam.d/sudo";
 const PAM_SYSTEM_LOGIN: &str = "/etc/pam.d/system-local-login";
+const PAM_PLASMA_LM: &str = "/etc/pam.d/plasmalogin";
 
 /// Returns true if a non-commented howdy auth line is present in the PAM file content
 fn pam_howdy_active(content: &str) -> bool {
@@ -104,7 +124,6 @@ fn pam_howdy_active(content: &str) -> bool {
     })
 }
 
-/// Run a program as root via pkexec, forwarding display variables so GUI/camera output works
 fn pkexec_with_display(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
     let mut cmd = Command::new("pkexec");
     cmd.arg("/usr/bin/env");
@@ -144,7 +163,35 @@ fn is_howdy_disabled(config_content: &str) -> bool {
     false // Default: not disabled (enabled)
 }
 
+/// Returns true if the given package is installed (pacman -Q)
+fn pacman_installed(pkg: &str) -> bool {
+    Command::new("pacman")
+        .args(["-Q", pkg])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 impl qobject::HowdyBackend {
+    /// Detect which display managers are present and set the corresponding properties.
+    /// Falls back to showing SDDM if neither is found.
+    pub fn detect_display_managers(mut self: Pin<&mut Self>) {
+        let version = std::env::var("APP_VERSION").unwrap_or_else(|_| "0.1.3".to_string());
+        self.as_mut().set_app_version(QString::from(&version));
+
+        let sddm = Path::new("/usr/bin/sddm").exists() || pacman_installed("sddm");
+        let plm = Path::new("/usr/bin/plasma-login-manager").exists()
+            || pacman_installed("plasma-login-manager");
+
+        self.as_mut().set_sddm_installed(sddm);
+        self.as_mut().set_plasma_lm_installed(plm);
+
+        // Neither detected → fall back to showing SDDM (most common on Arch)
+        if !sddm && !plm {
+            self.as_mut().set_sddm_installed(true);
+        }
+    }
+
     /// Check if device has a supported IR camera for howdy
     pub fn check_device(mut self: Pin<&mut Self>) {
         // Check multiple conditions for device support:
@@ -171,9 +218,7 @@ impl qobject::HowdyBackend {
         }
 
         // Use v4l2-ctl to list devices (recommended by Arch Wiki)
-        let v4l2_output = Command::new("v4l2-ctl")
-            .arg("--list-devices")
-            .output();
+        let v4l2_output = Command::new("v4l2-ctl").arg("--list-devices").output();
 
         let has_video_devices = match &v4l2_output {
             Ok(out) if out.status.success() => {
@@ -190,7 +235,8 @@ impl qobject::HowdyBackend {
         };
 
         if !has_video_devices {
-            status_msg = "No video devices found (install v4l-utils for better detection)".to_string();
+            status_msg =
+                "No video devices found (install v4l-utils for better detection)".to_string();
             self.as_mut().set_device_supported(false);
             self.as_mut().set_status_message(QString::from(&status_msg));
             return;
@@ -221,13 +267,19 @@ impl qobject::HowdyBackend {
                                         device_path_configured = true;
                                         supported = true;
                                         // Show friendly path info
-                                        if device.contains("/by-path/") || device.contains("/by-id/") {
-                                            status_msg = format!("Device configured (stable path): {}", device);
+                                        if device.contains("/by-path/")
+                                            || device.contains("/by-id/")
+                                        {
+                                            status_msg = format!(
+                                                "Device configured (stable path): {}",
+                                                device
+                                            );
                                         } else {
                                             status_msg = format!("Device found: {}", device);
                                         }
                                     } else {
-                                        status_msg = format!("Configured device {} not found", device);
+                                        status_msg =
+                                            format!("Configured device {} not found", device);
                                     }
                                 }
                             }
@@ -246,7 +298,8 @@ impl qobject::HowdyBackend {
         if !device_path_configured && has_video_devices {
             // Devices exist but may not be configured
             supported = true;
-            status_msg = "Video device(s) found - run 'sudo howdy config' to set device_path".to_string();
+            status_msg =
+                "Video device(s) found - run 'sudo howdy config' to set device_path".to_string();
         }
 
         self.as_mut().set_device_supported(supported);
@@ -258,14 +311,23 @@ impl qobject::HowdyBackend {
         let howdy = match find_howdy() {
             Some(p) => p,
             None => {
-                self.as_mut().set_status_message(QString::from("Howdy is not installed"));
+                self.as_mut()
+                    .set_status_message(QString::from("Howdy is not installed"));
                 return;
             }
         };
-        let output = Command::new("pkexec").args([&howdy, "list"]).output();
+        // Try without elevated privileges first; the models dir is often user-readable.
+        // Only fall back to pkexec if the unprivileged call fails — this avoids an
+        // extra password prompt on every startup / after every add/remove.
+        let output = Command::new(&howdy)
+            .args(["list"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .or_else(|| Command::new("pkexec").args([&howdy, "list"]).output().ok());
 
         match output {
-            Ok(out) => {
+            Some(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let mut models = QList::<QString>::default();
@@ -274,7 +336,8 @@ impl qobject::HowdyBackend {
                 let combined = format!("{}{}", stdout, stderr).to_lowercase();
                 if combined.contains("no users") || combined.contains("no models") {
                     self.as_mut().set_face_models(models);
-                    self.as_mut().set_status_message(QString::from("No faces registered"));
+                    self.as_mut()
+                        .set_status_message(QString::from("No faces registered"));
                     return;
                 }
 
@@ -305,57 +368,112 @@ impl qobject::HowdyBackend {
                         count
                     )));
                 } else {
-                    self.as_mut().set_status_message(QString::from("No faces registered"));
+                    self.as_mut()
+                        .set_status_message(QString::from("No faces registered"));
                 }
             }
-            Err(e) => {
-                self.as_mut().set_status_message(QString::from(&format!("Error: {}", e)));
+            None => {
+                self.as_mut()
+                    .set_status_message(QString::from("Failed to list models"));
             }
         }
     }
 
-    /// Add a new face model
+    /// Add a new face model — runs howdy asynchronously
     pub fn add_model(mut self: Pin<&mut Self>, name: QString) {
         let name_str = name.to_string();
         if name_str.is_empty() {
-            self.as_mut().set_status_message(QString::from("Please enter a model name"));
+            self.as_mut()
+                .set_status_message(QString::from("Failed: Please enter a model name"));
             return;
         }
 
         let howdy = match find_howdy() {
             Some(p) => p,
             None => {
-                self.as_mut().set_status_message(QString::from("Howdy is not installed"));
+                self.as_mut()
+                    .set_status_message(QString::from("Failed: Howdy is not installed"));
                 return;
             }
         };
 
-        self.as_mut().set_status_message(QString::from("Adding model... Look at the camera"));
+        // Set initial status - this tells QML capture has started
+        self.as_mut()
+            .set_status_message(QString::from("Look at the camera..."));
 
-        // Note: This runs in blocking mode. For better UX, this should be async
-        let output = pkexec_with_display(&howdy, &["add", "-y", &name_str]);
+        // Spawn a thread to run the blocking pkexec call
+        let howdy_clone = howdy.clone();
+        let name_clone = name_str.clone();
 
-        match output {
-            Ok(out) => {
-                if out.status.success() {
-                    self.as_mut().set_status_message(QString::from("Model added successfully"));
-                    self.refresh_models();
-                } else {
+        std::thread::spawn(move || {
+            let output = pkexec_with_display(&howdy_clone, &["add", "-y", &name_clone]);
+
+            let result_msg = match output {
+                Ok(out) if out.status.success() => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let combined = format!("{}{}", stdout, stderr).trim().to_string();
-                    let msg = if combined.is_empty() {
+                    let face_id = stdout
+                        .lines()
+                        .find(|l| l.trim().starts_with("Face added as "))
+                        .and_then(|l| {
+                            l.trim()
+                                .split_whitespace()
+                                .last()
+                                .and_then(|s| s.parse::<i32>().ok())
+                        });
+                    if let Some(id) = face_id {
+                        let _ = std::fs::write("/tmp/howdy_new_face_id.txt", id.to_string());
+                    }
+                    "Face registered successfully".to_string()
+                }
+                Ok(out) => {
+                    let combined = format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    )
+                    .trim()
+                    .to_string();
+                    if combined.is_empty() {
                         format!("Failed (exit code: {:?})", out.status.code())
                     } else {
                         format!("Failed: {}", combined)
-                    };
-                    self.as_mut().set_status_message(QString::from(&msg));
+                    }
                 }
-            }
-            Err(e) => {
-                self.as_mut().set_status_message(QString::from(&format!("Error: {}", e)));
+                Err(e) => format!("Failed: {}", e),
+            };
+
+            let _ = std::fs::write("/tmp/howdy_add_result.txt", &result_msg);
+        });
+    }
+
+    /// Check if there's a pending add_model result (called periodically from QML)
+    /// Returns true if a result was found and processed
+    pub fn check_add_result(mut self: Pin<&mut Self>) -> bool {
+        if let Ok(result) = std::fs::read_to_string("/tmp/howdy_add_result.txt") {
+            let _ = std::fs::remove_file("/tmp/howdy_add_result.txt");
+            self.as_mut().set_status_message(QString::from(&result));
+            return true;
+        }
+        false
+    }
+
+    /// Discard the just-registered face (delete it)
+    pub fn discard_face(mut self: Pin<&mut Self>) {
+        let howdy = match find_howdy() {
+            Some(p) => p,
+            None => return,
+        };
+
+        if let Ok(id_str) = std::fs::read_to_string("/tmp/howdy_new_face_id.txt") {
+            let _ = std::fs::remove_file("/tmp/howdy_new_face_id.txt");
+            if let Ok(id) = id_str.trim().parse::<i32>() {
+                let _ = Command::new("pkexec")
+                    .args([&howdy, "remove", "-y", &id.to_string()])
+                    .output();
             }
         }
+        self.as_mut()
+            .set_status_message(QString::from("Face discarded"));
     }
 
     /// Remove a face model by its ID
@@ -363,24 +481,30 @@ impl qobject::HowdyBackend {
         let howdy = match find_howdy() {
             Some(p) => p,
             None => {
-                self.as_mut().set_status_message(QString::from("Howdy is not installed"));
+                self.as_mut()
+                    .set_status_message(QString::from("Howdy is not installed"));
                 return;
             }
         };
-        let output = Command::new("pkexec").args([&howdy, "remove", "-y", &index.to_string()]).output();
+        let output = Command::new("pkexec")
+            .args([&howdy, "remove", "-y", &index.to_string()])
+            .output();
 
         match output {
             Ok(out) => {
                 if out.status.success() {
-                    self.as_mut().set_status_message(QString::from("Model removed"));
+                    self.as_mut()
+                        .set_status_message(QString::from("Model removed"));
                     self.refresh_models();
                 } else {
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    self.as_mut().set_status_message(QString::from(&format!("Failed: {}", stderr)));
+                    self.as_mut()
+                        .set_status_message(QString::from(&format!("Failed: {}", stderr)));
                 }
             }
             Err(e) => {
-                self.as_mut().set_status_message(QString::from(&format!("Error: {}", e)));
+                self.as_mut()
+                    .set_status_message(QString::from(&format!("Error: {}", e)));
             }
         }
     }
@@ -390,28 +514,37 @@ impl qobject::HowdyBackend {
         let howdy = match find_howdy() {
             Some(p) => p,
             None => {
-                self.as_mut().set_status_message(QString::from("Howdy is not installed"));
+                self.as_mut()
+                    .set_status_message(QString::from("Howdy is not installed"));
                 return;
             }
         };
         let current = *self.as_ref().howdy_enabled();
         let arg = if current { "1" } else { "0" };
 
-        let output = Command::new("pkexec").args([&howdy, "disable", arg]).output();
+        let output = Command::new("pkexec")
+            .args([&howdy, "disable", arg])
+            .output();
 
         match output {
             Ok(out) => {
                 if out.status.success() {
                     self.as_mut().set_howdy_enabled(!current);
-                    let msg = if current { "Howdy disabled" } else { "Howdy enabled" };
+                    let msg = if current {
+                        "Howdy disabled"
+                    } else {
+                        "Howdy enabled"
+                    };
                     self.as_mut().set_status_message(QString::from(msg));
                 } else {
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    self.as_mut().set_status_message(QString::from(&format!("Failed: {}", stderr)));
+                    self.as_mut()
+                        .set_status_message(QString::from(&format!("Failed: {}", stderr)));
                 }
             }
             Err(e) => {
-                self.as_mut().set_status_message(QString::from(&format!("Error: {}", e)));
+                self.as_mut()
+                    .set_status_message(QString::from(&format!("Error: {}", e)));
             }
         }
     }
@@ -470,19 +603,20 @@ impl qobject::HowdyBackend {
     pub fn test_camera(mut self: Pin<&mut Self>, device: QString) {
         let device_str = device.to_string();
         if device_str.is_empty() {
-            self.as_mut().set_status_message(QString::from("No device selected"));
+            self.as_mut()
+                .set_status_message(QString::from("No device selected"));
             return;
         }
         match Command::new("mpv").arg(&device_str).spawn() {
             Ok(_) => {
-                self.as_mut().set_status_message(
-                    QString::from(&format!("Previewing {} — close mpv when done", device_str))
-                );
+                self.as_mut().set_status_message(QString::from(&format!(
+                    "Previewing {} — close mpv when done",
+                    device_str
+                )));
             }
             Err(e) => {
-                self.as_mut().set_status_message(
-                    QString::from(&format!("Failed to launch mpv: {}", e))
-                );
+                self.as_mut()
+                    .set_status_message(QString::from(&format!("Failed to launch mpv: {}", e)));
             }
         }
     }
@@ -491,7 +625,8 @@ impl qobject::HowdyBackend {
     pub fn save_device_path(mut self: Pin<&mut Self>, device: QString) {
         let device_str = device.to_string();
         if device_str.is_empty() {
-            self.as_mut().set_status_message(QString::from("No device selected"));
+            self.as_mut()
+                .set_status_message(QString::from("No device selected"));
             return;
         }
 
@@ -516,7 +651,8 @@ impl qobject::HowdyBackend {
         let config_path = match config_path {
             Some(p) => p,
             None => {
-                self.as_mut().set_status_message(QString::from("Howdy config not found"));
+                self.as_mut()
+                    .set_status_message(QString::from("Howdy config not found"));
                 return;
             }
         };
@@ -543,42 +679,45 @@ impl qobject::HowdyBackend {
         // Write to a temp file, then copy it with elevated privileges
         let tmp = "/tmp/howdy_config_tmp.ini";
         if let Err(e) = fs::write(tmp, &new_content) {
-            self.as_mut().set_status_message(
-                QString::from(&format!("Failed to write temp file: {}", e))
-            );
+            self.as_mut()
+                .set_status_message(QString::from(&format!("Failed to write temp file: {}", e)));
             return;
         }
 
-        let output = Command::new("pkexec").args(["/usr/bin/cp", tmp, config_path]).output();
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/cp", tmp, config_path])
+            .output();
         let _ = fs::remove_file(tmp);
 
         match output {
             Ok(out) if out.status.success() => {
-                self.as_mut().set_status_message(
-                    QString::from(&format!("Camera saved: {}", device_str))
-                );
+                self.as_mut()
+                    .set_status_message(QString::from(&format!("Camera saved: {}", device_str)));
             }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                self.as_mut().set_status_message(
-                    QString::from(&format!("Failed to save: {}", stderr))
-                );
+                self.as_mut()
+                    .set_status_message(QString::from(&format!("Failed to save: {}", stderr)));
             }
             Err(e) => {
-                self.as_mut().set_status_message(
-                    QString::from(&format!("Error: {}", e))
-                );
+                self.as_mut()
+                    .set_status_message(QString::from(&format!("Error: {}", e)));
             }
         }
     }
 
-    /// Read all four PAM files and update the corresponding properties
+    /// Read all PAM files and update the corresponding properties
     pub fn check_pam_status(mut self: Pin<&mut Self>) {
-        let read = |p| fs::read_to_string(p).map(|c| pam_howdy_active(&c)).unwrap_or(false);
+        let read = |p| {
+            fs::read_to_string(p)
+                .map(|c| pam_howdy_active(&c))
+                .unwrap_or(false)
+        };
         self.as_mut().set_pam_sddm(read(PAM_SDDM));
         self.as_mut().set_pam_kde(read(PAM_KDE));
         self.as_mut().set_pam_sudo(read(PAM_SUDO));
         self.as_mut().set_pam_system_login(read(PAM_SYSTEM_LOGIN));
+        self.as_mut().set_pam_plasma_lm(read(PAM_PLASMA_LM));
     }
 
     /// Toggle the howdy line in the given PAM file path:
@@ -589,10 +728,25 @@ impl qobject::HowdyBackend {
 
         let content = match fs::read_to_string(&file_path) {
             Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // No /etc/pam.d/ override yet — seed from vendor config if available
+                let vendor = file_path.replace("/etc/pam.d/", "/usr/lib/pam.d/");
+                match fs::read_to_string(&vendor) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        self.as_mut().set_status_message(QString::from(&format!(
+                            "No PAM config found for {}",
+                            file_path
+                        )));
+                        return;
+                    }
+                }
+            }
             Err(e) => {
-                self.as_mut().set_status_message(
-                    QString::from(&format!("Cannot read {}: {}", file_path, e))
-                );
+                self.as_mut().set_status_message(QString::from(&format!(
+                    "Cannot read {}: {}",
+                    file_path, e
+                )));
                 return;
             }
         };
@@ -601,14 +755,21 @@ impl qobject::HowdyBackend {
 
         let new_content = if currently_enabled {
             // Disable: comment out every active howdy auth line
-            content.lines().map(|line| {
-                let t = line.trim();
-                if !t.starts_with('#') && (t.contains("pam_howdy.so") || t.contains("howdy/pam.py")) {
-                    format!("#{}", line)
-                } else {
-                    line.to_string()
-                }
-            }).collect::<Vec<_>>().join("\n") + "\n"
+            content
+                .lines()
+                .map(|line| {
+                    let t = line.trim();
+                    if !t.starts_with('#')
+                        && (t.contains("pam_howdy.so") || t.contains("howdy/pam.py"))
+                    {
+                        format!("#{}", line)
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
         } else {
             let has_commented = content.lines().any(|line| {
                 let t = line.trim();
@@ -616,18 +777,33 @@ impl qobject::HowdyBackend {
             });
             if has_commented {
                 // Uncomment: strip leading # and optional space
-                content.lines().map(|line| {
-                    let t = line.trim();
-                    if t.starts_with('#') && (t.contains("pam_howdy.so") || t.contains("howdy/pam.py")) {
-                        t.strip_prefix('#').unwrap_or(t).trim_start().to_string()
-                    } else {
-                        line.to_string()
-                    }
-                }).collect::<Vec<_>>().join("\n") + "\n"
+                content
+                    .lines()
+                    .map(|line| {
+                        let t = line.trim();
+                        if t.starts_with('#')
+                            && (t.contains("pam_howdy.so") || t.contains("howdy/pam.py"))
+                        {
+                            t.strip_prefix('#').unwrap_or(t).trim_start().to_string()
+                        } else {
+                            line.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n"
             } else {
                 // Insert after #%PAM-1.0 header if present, otherwise at the top
                 let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-                let pos = if lines.first().map(|l| l.starts_with("#%PAM-1.0")).unwrap_or(false) { 1 } else { 0 };
+                let pos = if lines
+                    .first()
+                    .map(|l| l.starts_with("#%PAM-1.0"))
+                    .unwrap_or(false)
+                {
+                    1
+                } else {
+                    0
+                };
                 lines.insert(pos, PAM_LINE.to_string());
                 lines.join("\n") + "\n"
             }
@@ -635,13 +811,14 @@ impl qobject::HowdyBackend {
 
         let tmp = "/tmp/howdy_pam_tmp";
         if let Err(e) = fs::write(tmp, &new_content) {
-            self.as_mut().set_status_message(
-                QString::from(&format!("Failed to write temp file: {}", e))
-            );
+            self.as_mut()
+                .set_status_message(QString::from(&format!("Failed to write temp file: {}", e)));
             return;
         }
 
-        let output = Command::new("pkexec").args(["/usr/bin/cp", tmp, file_path.as_str()]).output();
+        let output = Command::new("pkexec")
+            .args(["/usr/bin/cp", tmp, file_path.as_str()])
+            .output();
         let _ = fs::remove_file(tmp);
 
         match output {
@@ -655,22 +832,25 @@ impl qobject::HowdyBackend {
                 };
                 // Update the property that corresponds to this file
                 match file_path.as_str() {
-                    PAM_SDDM         => self.as_mut().set_pam_sddm(new_state),
-                    PAM_KDE          => self.as_mut().set_pam_kde(new_state),
-                    PAM_SUDO         => self.as_mut().set_pam_sudo(new_state),
+                    PAM_SDDM => self.as_mut().set_pam_sddm(new_state),
+                    PAM_KDE => self.as_mut().set_pam_kde(new_state),
+                    PAM_SUDO => self.as_mut().set_pam_sudo(new_state),
                     PAM_SYSTEM_LOGIN => self.as_mut().set_pam_system_login(new_state),
-                    _                => {}
+                    PAM_PLASMA_LM => self.as_mut().set_pam_plasma_lm(new_state),
+                    _ => {}
                 }
                 self.as_mut().set_status_message(QString::from(&msg));
             }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                self.as_mut().set_status_message(
-                    QString::from(&format!("Failed to update PAM: {}", stderr))
-                );
+                self.as_mut().set_status_message(QString::from(&format!(
+                    "Failed to update PAM: {}",
+                    stderr
+                )));
             }
             Err(e) => {
-                self.as_mut().set_status_message(QString::from(&format!("Error: {}", e)));
+                self.as_mut()
+                    .set_status_message(QString::from(&format!("Error: {}", e)));
             }
         }
     }
@@ -680,11 +860,13 @@ impl qobject::HowdyBackend {
         let howdy = match find_howdy() {
             Some(p) => p,
             None => {
-                self.as_mut().set_status_message(QString::from("Howdy is not installed"));
+                self.as_mut()
+                    .set_status_message(QString::from("Howdy is not installed"));
                 return;
             }
         };
-        self.as_mut().set_status_message(QString::from("Running test... Look at the camera"));
+        self.as_mut()
+            .set_status_message(QString::from("Running test... Look at the camera"));
 
         let output = pkexec_with_display(&howdy, &["test"]);
 
@@ -692,14 +874,18 @@ impl qobject::HowdyBackend {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let result = if out.status.success() {
-                    format!("Test complete: {}", stdout.lines().last().unwrap_or("Success"))
+                    format!(
+                        "Test complete: {}",
+                        stdout.lines().last().unwrap_or("Success")
+                    )
                 } else {
                     format!("Test failed: {}", String::from_utf8_lossy(&out.stderr))
                 };
                 self.as_mut().set_status_message(QString::from(&result));
             }
             Err(e) => {
-                self.as_mut().set_status_message(QString::from(&format!("Error: {}", e)));
+                self.as_mut()
+                    .set_status_message(QString::from(&format!("Error: {}", e)));
             }
         }
     }
