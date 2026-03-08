@@ -54,6 +54,101 @@ ApplicationWindow {
         onTriggered: backend.refresh_models()
     }
 
+    // ── Polkit security disclaimer dialog ───────────────────────────────────
+    Dialog {
+        id: polkitWarningDialog
+        title: "Security Warning — pkexec / Polkit"
+        modal: true
+        closePolicy: Popup.NoAutoClose
+        anchors.centerIn: Overlay.overlay
+        width: 560
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 14
+
+            Label {
+                Layout.fillWidth: true
+                text: "Enabling face authentication for Polkit modifies system security configuration. Please read before continuing."
+                font.pixelSize: 14
+                font.bold: true
+                wrapMode: Text.Wrap
+                color: "#FFA726"
+            }
+
+            Label {
+                Layout.fillWidth: true
+                text: "The following files will be modified or created:"
+                font.pixelSize: 13
+                wrapMode: Text.Wrap
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                color: palette.alternateBase
+                radius: 6
+                height: fileList.implicitHeight + 16
+
+                Column {
+                    id: fileList
+                    anchors { left: parent.left; right: parent.right; top: parent.top; margins: 8 }
+                    spacing: 4
+
+                    Label { text: "• /etc/pam.d/polkit-1"; font.pixelSize: 12; font.family: "monospace" }
+                    Label { text: "• /etc/systemd/system/polkit-agent-helper@.service.d/override.conf"; font.pixelSize: 12; font.family: "monospace"; wrapMode: Text.Wrap; width: parent.width - 16 }
+                }
+            }
+
+            Label {
+                Layout.fillWidth: true
+                text: "What this does:\n" +
+                      "• Adds Howdy face auth to the Polkit PAM stack (/etc/pam.d/polkit-1)\n" +
+                      "• Disables the systemd PrivateDevices sandbox for polkit-agent-helper so the camera (/dev/video*) is accessible\n" +
+                      "• Restarts polkit-agent-helper.socket to apply changes\n\n" +
+                      "Security implications:\n" +
+                      "• The polkit-agent-helper process will no longer run in a device-isolated sandbox\n" +
+                      "• This is required for camera access but reduces the isolation of the polkit authentication helper"
+                font.pixelSize: 13
+                wrapMode: Text.Wrap
+                color: palette.placeholderText
+            }
+
+            Label {
+                Layout.fillWidth: true
+                text: "Only proceed if you understand and accept these changes."
+                font.pixelSize: 13
+                font.italic: true
+                wrapMode: Text.Wrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: "Cancel"
+                    font.pixelSize: 14
+                    onClicked: {
+                        polkitSwitch.checked = false
+                        polkitWarningDialog.close()
+                    }
+                }
+
+                Button {
+                    text: "Enable Anyway"
+                    font.pixelSize: 14
+                    highlighted: true
+                    onClicked: {
+                        polkitWarningDialog.close()
+                        backend.toggle_pam("/etc/pam.d/polkit-1")
+                    }
+                }
+            }
+        }
+    }
+
     // ── Camera selection dialog (first-run) ──────────────────────────────────
     Dialog {
         id: cameraDialog
@@ -643,7 +738,19 @@ ApplicationWindow {
                             Label { text: "Authenticate polkit and pkexec prompts with your face"; font.pixelSize: 12; color: palette.placeholderText }
                         }
                         Item { Layout.fillWidth: true }
-                        Switch { checked: backend.pam_polkit; onToggled: backend.toggle_pam("/etc/pam.d/polkit-1") }
+                        Switch {
+                            id: polkitSwitch
+                            checked: backend.pam_polkit
+                            onToggled: {
+                                if (checked) {
+                                    // Enabling — show disclaimer first, don't call backend yet
+                                    polkitWarningDialog.open()
+                                } else {
+                                    // Disabling — no warning needed
+                                    backend.toggle_pam("/etc/pam.d/polkit-1")
+                                }
+                            }
+                        }
                     }
 
                     Rectangle { Layout.fillWidth: true; height: 1; color: palette.mid; opacity: 0.4; Layout.topMargin: 4; Layout.bottomMargin: 4 }

@@ -1,7 +1,7 @@
 # Maintainer: xero <x@xero.dev>
 
 pkgname=xero-howdy-qt
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="Qt GUI for managing Howdy face authentication on Windows Hello supported devices"
 arch=('x86_64')
