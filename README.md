@@ -27,7 +27,7 @@ To test without installing the package:
 sudo pacman -S rust clang qt6-base qt6-declarative howdy-bin
 
 # Clone and run
-git clone https://github.com/XeroLinuxDev/xero-howdy-qt.git
+git clone https://github.com/XeroLinux/xero-howdy-qt.git
 cd xero-howdy-qt
 cargo run
 ```

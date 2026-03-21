@@ -799,7 +799,7 @@ ApplicationWindow {
                 color: "#9C27B0"
                 MouseArea {
                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                    onClicked: Qt.openUrlExternally("https://github.com/XeroLinuxDev")
+                    onClicked: Qt.openUrlExternally("https://github.com/XeroLinux")
                 }
             }
         }

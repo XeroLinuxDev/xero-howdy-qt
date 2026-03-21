@@ -4,7 +4,7 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>XeroLinux</vendor>
-  <vendor_url>https://github.com/XeroLinuxDev/xero-howdy-qt</vendor_url>
+  <vendor_url>https://github.com/XeroLinux/xero-howdy-qt</vendor_url>
 
   <action id="dev.xerolinux.xero-howdy-qt.run-howdy">
     <description>Manage Howdy face authentication</description>
